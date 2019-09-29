@@ -34,7 +34,8 @@ bAddress(0), // Device address - mandatory
 bNumEP(1), // If config descriptor needs to be parsed
 qNextPollTime(0), // Reset NextPollTime
 pollInterval(0),
-bPollEnable(false) // Don't start polling before dongle is connected
+bPollEnable(false), // Don't start polling before dongle is connected
+safeToDoorknob(false)
 {
         for(uint8_t i = 0; i < BTD_NUM_SERVICES; i++)
                 btService[i] = NULL;
@@ -403,7 +404,24 @@ void BTD::HCI_event_task() {
                                                 for(uint8_t i = 0; i < 6; i++)
                                                         my_bdaddr[i] = hcibuf[6 + i];
                                                 hci_set_flag(HCI_FLAG_READ_BDADDR);
+                                        } else if((hcibuf[3] == 0x05) && (hcibuf[4] == 0x14)) { // Parameters from read rssi
+                                                rssi_value=hcibuf[8];
+#ifdef DEBUG_USB_HOST
+                                                Notify(PSTR("\r\nRead Strength: "), 0x80);
+                                                Notify(rssi_value, 0x80);
+#endif
+                                                if(isDoorknob){
+                                                        if(rssi_value >= rssi_threshold && pFuncOnAuth)
+                                                                pFuncOnAuth(); // Call the user function
+                                                        hci_disconnect(hci_handle);
+                                                }
                                         }
+                                } else {
+#ifdef DEBUG_USB_HOST
+                                        Notify(PSTR("\r\nHCI Command Failed: "), 0x80);
+                                        D_PrintHex<uint8_t > (hcibuf[5], 0x80);
+                                        D_PrintHex<uint8_t > (hcibuf[3], 0x80);
+#endif
                                 }
                                 break;
 
@@ -412,7 +430,11 @@ void BTD::HCI_event_task() {
 #ifdef DEBUG_USB_HOST
                                         Notify(PSTR("\r\nHCI Command Failed: "), 0x80);
                                         D_PrintHex<uint8_t > (hcibuf[2], 0x80);
+                                        D_PrintHex<uint8_t > (hcibuf[4], 0x80);
 #endif
+                                        if(hcibuf[2] == 0x05) { // disconnect if authentication fails.
+                                                hci_disconnect(hci_handle);
+                                        }
                                 }
                                 break;
 
@@ -484,26 +506,29 @@ void BTD::HCI_event_task() {
                                 break;
 
                         case EV_CONNECT_COMPLETE:
+                                if(hci_check_flag(HCI_FLAG_CONNECT_EVENT)) break;
                                 hci_set_flag(HCI_FLAG_CONNECT_EVENT);
                                 if(!hcibuf[2]) { // Check if connected OK
 #ifdef EXTRADEBUG
                                         Notify(PSTR("\r\nConnection established"), 0x80);
 #endif
-                                        hci_handle = hcibuf[3] | ((hcibuf[4] & 0x0F) << 8); // Store the handle for the ACL connection
                                         hci_set_flag(HCI_FLAG_CONNECT_COMPLETE); // Set connection complete flag
+                                        hci_handle = hcibuf[3] | ((hcibuf[4] & 0x0F) << 8); // Store the handle for the ACL connection
                                 } else {
                                         hci_state = HCI_CHECK_DEVICE_SERVICE;
 #ifdef DEBUG_USB_HOST
                                         Notify(PSTR("\r\nConnection Failed: "), 0x80);
                                         D_PrintHex<uint8_t > (hcibuf[2], 0x80);
 #endif
+                                        safeToDoorknob = true;
                                 }
                                 break;
 
                         case EV_DISCONNECT_COMPLETE:
-                                if(!hcibuf[2]) { // Check if disconnected OK
+                               if(!hcibuf[2]) { // Check if disconnected OK
                                         hci_set_flag(HCI_FLAG_DISCONNECT_COMPLETE); // Set disconnect command complete flag
                                         hci_clear_flag(HCI_FLAG_CONNECT_COMPLETE); // Clear connection complete flag
+                                        safeToDoorknob = true;
                                 }
                                 break;
 
@@ -547,6 +572,7 @@ void BTD::HCI_event_task() {
                                 D_PrintHex<uint8_t > (classOfDevice[0], 0x80);
 #endif
                                 hci_set_flag(HCI_FLAG_INCOMING_REQUEST);
+                                hci_clear_flag(HCI_FLAG_CONNECT_COMPLETE | HCI_FLAG_CONNECT_EVENT);
                                 break;
 
                         case EV_PIN_CODE_REQUEST:
@@ -573,7 +599,14 @@ void BTD::HCI_event_task() {
 #ifdef DEBUG_USB_HOST
                                 Notify(PSTR("\r\nReceived Key Request"), 0x80);
 #endif
-                                hci_link_key_request_negative_reply();
+                                if(hasKey) {
+                                        Notify(PSTR("\r\nSending key"), 0x80);
+                                        hci_link_key_request_reply();
+                                }
+                                else {
+                                        Notify(PSTR("\r\nSending no key"), 0x80);
+                                        hci_link_key_request_negative_reply();
+                                }
                                 break;
 
                         case EV_AUTHENTICATION_COMPLETE:
@@ -587,18 +620,39 @@ void BTD::HCI_event_task() {
                                         Notify(PSTR("\r\nPairing successful with HID device"), 0x80);
 #endif
                                         connectToHIDDevice = true; // Used to indicate to the BTHID service, that it should connect to this device
+                                } else if(isDoorknob){
+#ifdef DEBUG_USB_HOST
+                                        Notify(PSTR("\r\nPairing successful with phone device"), 0x80);
+#endif
+                                        hci_read_rssi(hci_handle);
+                                        connectToHIDDevice = true; // Used to indicate to the BTHID service, that it should connect to this device
                                 }
                                 break;
+                        case EV_LINK_KEY_NOTIFICATION:
+#ifdef DEBUG_USB_HOST
+                                Notify(PSTR("\r\nReceived Key Notification"), 0x80);
+                                D_PrintHex<uint8_t > (hcibuf[24], 0x80);
+#endif
+                                for(uint8_t i = 0; i < 6; i++) {
+                                        disc_bdaddr[i] = hcibuf[i + 2];
+                                        pair_bdaddr[i] = hcibuf[i + 2];
+                                }
+                                
+                                for(uint8_t i = 0; i < 16; i++)
+                                        link_key[i] = hcibuf[i + 8];
+
+                                hasKey = true;
+
+                                break;
                                 /* We will just ignore the following events */
-                        case EV_NUM_COMPLETE_PKT:
                         case EV_ROLE_CHANGED:
+                        case EV_NUM_COMPLETE_PKT:
                         case EV_PAGE_SCAN_REP_MODE:
                         case EV_LOOPBACK_COMMAND:
                         case EV_DATA_BUFFER_OVERFLOW:
                         case EV_CHANGE_CONNECTION_LINK:
                         case EV_MAX_SLOTS_CHANGE:
                         case EV_QOS_SETUP_COMPLETE:
-                        case EV_LINK_KEY_NOTIFICATION:
                         case EV_ENCRYPTION_CHANGE:
                         case EV_READ_REMOTE_VERSION_INFORMATION_COMPLETE:
                                 break;
@@ -721,7 +775,7 @@ void BTD::HCI_task() {
                                 else
                                         Notify(PSTR("\r\nHID device found"), 0x80);
 
-                                Notify(PSTR("\r\nNow just create the instance like so:"), 0x80);
+                                Notify(PSTR("\r\nNow just create the instance like so:"), 0x80);        
                                 if(pairWithWii)
                                         Notify(PSTR("\r\nWII Wii(&Btd);"), 0x80);
                                 else
@@ -796,6 +850,13 @@ void BTD::HCI_task() {
                                 hci_state = HCI_REMOTE_NAME_STATE;
                         } else if(hci_check_flag(HCI_FLAG_DISCONNECT_COMPLETE))
                                 hci_state = HCI_DISCONNECT_STATE;
+                        else if(isDoorknob && safeToDoorknob && connectToDoorknob) {
+                                hci_state = HCI_CONNECT_DEVICE_STATE;
+                                connectToDoorknob = false;
+                                safeToDoorknob = false;
+                                for(uint8_t i = 0; i < 6; i++)  //make sure hci_connect connects to the paired device
+                                        disc_bdaddr[i] = pair_bdaddr[i];
+                        }
                         break;
 
                 case HCI_REMOTE_NAME_STATE:
@@ -890,7 +951,6 @@ void BTD::HCI_task() {
                                 connectToWii = incomingWii = pairWithWii = false;
                                 connectToHIDDevice = incomingHIDDevice = pairWithHIDDevice = checkRemoteName = false;
                                 incomingPS4 = false;
-
                                 hci_state = HCI_SCANNING_STATE;
                         }
                         break;
@@ -1125,6 +1185,22 @@ void BTD::hci_pin_code_negative_request_reply() {
         HCI_Command(hcibuf, 9);
 }
 
+void BTD::hci_link_key_request_reply() {
+        hcibuf[0] = 0x0B; // HCI OCF = 0B
+        hcibuf[1] = 0x01 << 2; // HCI OGF = 1
+        hcibuf[2] = 0x16; // parameter length 22
+        hcibuf[3] = disc_bdaddr[0]; // 6 octet bdaddr
+        hcibuf[4] = disc_bdaddr[1];
+        hcibuf[5] = disc_bdaddr[2];
+        hcibuf[6] = disc_bdaddr[3];
+        hcibuf[7] = disc_bdaddr[4];
+        hcibuf[8] = disc_bdaddr[5];
+        for(uint8_t i = 0; i < 16; i++)
+                hcibuf[9+i] = link_key[i];
+
+        HCI_Command(hcibuf, 25);
+}
+
 void BTD::hci_link_key_request_negative_reply() {
         hcibuf[0] = 0x0C; // HCI OCF = 0C
         hcibuf[1] = 0x01 << 2; // HCI OGF = 1
@@ -1170,6 +1246,17 @@ void BTD::hci_write_class_of_device() { // See http://bluetooth-pentest.narod.ru
         hcibuf[5] = 0x00;
 
         HCI_Command(hcibuf, 6);
+}
+
+void BTD::hci_read_rssi(uint16_t handle) {
+        hci_clear_flag(HCI_FLAG_DISCONNECT_COMPLETE);
+        hcibuf[0] = 0x05; // HCI OCF = 5
+        hcibuf[1] = 0x05 << 2; // HCI OGF = 5
+        hcibuf[2] = 0x02; // parameter length = 2
+        hcibuf[3] = (uint8_t)(handle & 0xFF); //connection handle - low byte
+        hcibuf[4] = (uint8_t)((handle >> 8) & 0x0F); //connection handle - high byte
+
+        HCI_Command(hcibuf, 5);
 }
 /*******************************************************************
  *                                                                 *

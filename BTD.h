@@ -341,11 +341,16 @@ public:
          * but can be customized for the SPP library.
          */
         void hci_pin_code_request_reply();
-        /** Respons when no pin was set. */
+        /** Response when no pin was set. */
         void hci_pin_code_negative_request_reply();
         /**
          * Command is used to reply to a Link Key Request event from the BR/EDR Controller
-         * if the Host does not have a stored Link Key for the connection.
+         * if the driver does have a stored Link Key for the connection.
+         */
+        void hci_link_key_request_reply();
+        /**
+         * Command is used to reply to a Link Key Request event from the BR/EDR Controller
+         * if the driver does not have a stored Link Key for the connection.
          */
         void hci_link_key_request_negative_reply();
         /** Used to try to authenticate with the remote device. */
@@ -363,6 +368,10 @@ public:
         void hci_connect(uint8_t *bdaddr);
         /** Used to a set the class of the device. */
         void hci_write_class_of_device();
+        /** Used to read the signal strength
+         * @param handle The HCI Handle for the connection.
+         */
+        void hci_read_rssi(uint16_t handle);
         /**@}*/
 
         /** @name L2CAP Commands */
@@ -451,8 +460,12 @@ public:
         uint16_t hci_handle;
         /** Last incoming devices Bluetooth address. */
         uint8_t disc_bdaddr[6];
+        /** Last paired device Bluetooth address. */
+        uint8_t pair_bdaddr[6];
         /** First 30 chars of last remote name. */
         char remote_name[30];
+        int8_t rssi_value;
+        int8_t rssi_threshold;
         /**
          * The supported HCI Version read from the Bluetooth dongle.
          * Used by the PS3BT library to check the HCI Version of the Bluetooth dongle,
@@ -465,6 +478,9 @@ public:
                 pairWithWii = true;
                 hci_state = HCI_CHECK_DEVICE_SERVICE;
         };
+        void connectDoorknob() {
+                connectToDoorknob = true;
+        }
         /** Used to only send the ACL data to the Wiimote. */
         bool connectToWii;
         /** True if a Wiimote is connecting. */
@@ -472,6 +488,7 @@ public:
         /** True when it should pair with a Wiimote. */
         bool pairWithWii;
         /** True if it's the new Wiimote with the Motion Plus Inside or a Wii U Pro Controller. */
+        bool connectToDoorknob;
         bool motionPlusInside;
         /** True if it's a Wii U Pro Controller. */
         bool wiiUProController;
@@ -487,6 +504,8 @@ public:
         bool incomingHIDDevice;
         /** True when it should pair with a device like a mouse or keyboard. */
         bool pairWithHIDDevice;
+        /** True when acting as doorknob. */
+        bool isDoorknob;
 
         /**
          * Read the poll interval taken from the endpoint descriptors.
@@ -494,6 +513,13 @@ public:
          */
         uint8_t readPollInterval() {
                 return pollInterval;
+        };
+        /**
+         * Used to call your own function when the device is successfully initialized.
+         * @param funcOnInit Function to call.
+         */
+        void attachOnAuth(void (*funcOnAuth)(void)) {
+                pFuncOnAuth = funcOnAuth;
         };
 
 protected:
@@ -520,6 +546,9 @@ protected:
         /** ACL Out endpoint index. */
         static const uint8_t BTD_DATAOUT_PIPE;
 
+        /** Pointer to function called when authenticated(). */
+        void (*pFuncOnAuth)(void);
+
         /**
          * Used to print the USB Endpoint Descriptor.
          * @param ep_ptr Pointer to USB Endpoint Descriptor.
@@ -539,6 +568,9 @@ private:
         bool checkRemoteName; // Used to check remote device's name before connecting.
         bool incomingPS4; // True if a PS4 controller is connecting
         uint8_t classOfDevice[3]; // Class of device of last device
+        bool hasKey; // True if link key has been set
+        uint8_t link_key[16]; // Bluetooth link key
+        bool safeToDoorknob;
 
         /* Variables used by high level HCI task */
         uint8_t hci_state; // Current state of Bluetooth HCI connection

@@ -57,6 +57,16 @@ void E_Notify(uint8_t b, int lvl) {
         //USB_HOST_SERIAL.flush();
 }
 
+void E_Notify(int8_t b, int lvl) {
+        if(UsbDEBUGlvl < lvl) return;
+#if defined(ARDUINO) && ARDUINO >=100
+        USB_HOST_SERIAL.print(b);
+#else
+        USB_HOST_SERIAL.print(b, DEC);
+#endif
+        //USB_HOST_SERIAL.flush();
+}
+
 void E_Notify(double d, int lvl) {
         if(UsbDEBUGlvl < lvl) return;
         USB_HOST_SERIAL.print(d);
